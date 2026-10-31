@@ -1,117 +1,204 @@
 import Foundation
 
+// MARK: - Flexible Decoding Helper
 extension KeyedDecodingContainer {
-    /// Xtream restituisce lo stesso campo a volte come stringa, a volte come numero.
-    func flex(_ key: Key) -> String? {
-        if let s = try? decode(String.self, forKey: key) { return s }
-        if let i = try? decode(Int.self, forKey: key) { return String(i) }
-        if let d = try? decode(Double.self, forKey: key) { return String(d) }
+    func flex<T: Decodable>(_ key: Key) throws -> T? {
+        if let v = try? decode(T.self, forKey: key) { return v }
+        if let s = try? decode(String.self, forKey: key),
+           let v = s as? T { return v }
+        if let i = try? decode(Int.self, forKey: key),
+           let v = i as? T { return v }
+        if let d = try? decode(Double.self, forKey: key),
+           let v = d as? T { return v }
         return nil
     }
 }
 
-protocol CatalogItem: Identifiable, Hashable {
+// MARK: - Core Models
+struct Category: Decodable, Identifiable, Hashable {
+    let id: Int
+    let name: String
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id   = try c.flex(.id)   ?? 0
+        name = try c.flex(.name) ?? ""
+    }
+}
+
+struct LiveChannel: Decodable, Identifiable, Hashable {
+    let id: Int
+    let name: String
+    let icon: String?
+    let categoryId: Int?
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id          = try c.flex(.id) ?? 0
+        name        = try c.flex(.name) ?? ""
+        icon        = try c.flex(.icon)
+        categoryId  = try c.flex(.categoryId)
+    }
+}
+
+// MARK: - EPG Models
+struct EPGProgram: Decodable, Identifiable, Hashable {
+    let id: String
+    let channelId: Int
+    let title: String
+    let description: String?
+    let start: Date
+    let end: Date
+    let category: String?  // es. "Sport", "Calcio", "Serie A"
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id          = try c.flex(.id) ?? UUID().uuidString
+        channelId   = try c.flex(.channelId) ?? 0
+        title       = try c.flex(.title) ?? ""
+        description = try c.flex(.description)
+        category    = try c.flex(.category)
+
+        // Xtream restituisce timestamp Unix (string o int)
+        let startTS: Int = try c.flex(.start) ?? 0
+        let endTS:   Int = try c.flex(.end)   ?? 0
+        start = Date(timeIntervalSince1970: TimeInterval(startTS))
+        end   = Date(timeIntervalSince1970: TimeInterval(endTS))
+    }
+
+    var isLiveNow: Bool {
+        let now = Date()
+        return now >= start && now <= end
+    }
+
+    var isUpcoming: Bool {
+        Date() < start
+    }
+
+    var duration: TimeInterval { end.timeIntervalSince(start) }
+    var formattedTime: String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return "\(f.string(from: start)) - \(f.string(from: end))"
+    }
+}
+
+struct EPGChannel: Identifiable, Hashable {
+    let id: Int
+    let name: String
+    let icon: String?
+    let programs: [EPGProgram]
+
+    init(channel: LiveChannel, programs: [EPGProgram] = []) {
+        self.id = channel.id
+        self.name = channel.name
+        self.icon = channel.icon
+        self.programs = programs.sorted { $0.start < $1.start }
+    }
+
+    var currentProgram: EPGProgram? {
+        programs.first { $0.isLiveNow }
+    }
+
+    var nextProgram: EPGProgram? {
+        programs.first { $0.isUpcoming }
+    }
+}
+
+// MARK: - Sport Models
+struct FootballMatch: Identifiable, Hashable {
+    let id: String
+    let homeTeam: String
+    let awayTeam: String
+    let league: String
+    let startTime: Date
+    let endTime: Date
+    let channels: [LiveChannel]  // Canali che trasmettono questa partita
+
+    var isLiveNow: Bool {
+        let now = Date()
+        return now >= startTime && now <= endTime
+    }
+
+    var formattedTime: String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f.string(from: startTime)
+    }
+
+    var formattedDate: String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "it_IT")
+        f.dateFormat = "EEEE d MMMM"
+        return f.string(from: startTime).capitalized
+    }
+}
+
+struct LeagueGroup: Identifiable {
+    let id = UUID()
+    let name: String
+    let matches: [FootballMatch]
+}
+
+// MARK: - VOD Models (rimangono per compatibilità ma non usati in UI)
+protocol CatalogItem: Decodable, Identifiable {
+    var id: Int { get }
     var title: String { get }
-    var imageURL: URL? { get }
+    var imageURL: String? { get }
 }
 
-struct Category: Identifiable, Hashable, Decodable {
-    let id: String
-    let name: String
-    enum K: String, CodingKey { case category_id, category_name }
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: K.self)
-        id = c.flex(.category_id) ?? UUID().uuidString
-        name = c.flex(.category_name) ?? "—"
-    }
-}
-
-struct LiveChannel: Identifiable, Hashable, Decodable {
-    let id: Int
-    let name: String
-    let icon: URL?
-    enum K: String, CodingKey { case stream_id, name, stream_icon }
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: K.self)
-        id = Int(c.flex(.stream_id) ?? "") ?? 0
-        name = c.flex(.name) ?? ""
-        icon = c.flex(.stream_icon).flatMap { URL(string: $0) }
-    }
-}
-
-struct Movie: CatalogItem, Decodable {
+struct Movie: CatalogItem {
     let id: Int
     let title: String
-    let imageURL: URL?
-    let ext: String
+    let imageURL: String?
+    let containerExtension: String?
     let rating: String?
-    enum K: String, CodingKey { case stream_id, name, stream_icon, container_extension, rating }
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: K.self)
-        id = Int(c.flex(.stream_id) ?? "") ?? 0
-        title = c.flex(.name) ?? ""
-        imageURL = c.flex(.stream_icon).flatMap { URL(string: $0) }
-        ext = c.flex(.container_extension) ?? "mp4"
-        rating = c.flex(.rating)
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.flex(.id) ?? 0
+        title = try c.flex(.title) ?? ""
+        imageURL = try c.flex(.imageURL)
+        containerExtension = try c.flex(.containerExtension)
+        rating = try c.flex(.rating)
     }
 }
 
-struct Show: CatalogItem, Decodable {
+struct Show: CatalogItem {
     let id: Int
     let title: String
-    let imageURL: URL?
+    let imageURL: String?
     let plot: String?
-    enum K: String, CodingKey { case series_id, name, cover, plot }
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: K.self)
-        id = Int(c.flex(.series_id) ?? "") ?? 0
-        title = c.flex(.name) ?? ""
-        imageURL = c.flex(.cover).flatMap { URL(string: $0) }
-        plot = c.flex(.plot)
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.flex(.id) ?? 0
+        title = try c.flex(.title) ?? ""
+        imageURL = try c.flex(.imageURL)
+        plot = try c.flex(.plot)
     }
 }
 
-struct Episode: Identifiable, Hashable, Decodable {
-    let id: String
+struct Episode: Decodable, Identifiable, Hashable {
+    let id: Int
     let title: String
-    let ext: String
-    let number: Int
-    let image: URL?
-    enum K: String, CodingKey { case id, title, container_extension, episode_num, info }
-    enum I: String, CodingKey { case movie_image }
+    let containerExtension: String?
+    let episodeNum: Int?
+    let imageURL: String?
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: K.self)
-        id = c.flex(.id) ?? UUID().uuidString
-        title = c.flex(.title) ?? "Episodio"
-        ext = c.flex(.container_extension) ?? "mp4"
-        number = Int(c.flex(.episode_num) ?? "") ?? 0
-        let info = try? c.nestedContainer(keyedBy: I.self, forKey: .info)
-        image = info?.flex(.movie_image).flatMap { URL(string: $0) }
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.flex(.id) ?? 0
+        title = try c.flex(.title) ?? ""
+        containerExtension = try c.flex(.containerExtension)
+        episodeNum = try c.flex(.episodeNum)
+        imageURL = try c.flex(.imageURL)
     }
 }
 
 struct SeriesDetail: Decodable {
-    let seasons: [Int: [Episode]]
-    enum K: String, CodingKey { case episodes }
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: K.self)
-        // Se non ci sono episodi alcuni server mandano [] invece di {}
-        let raw = (try? c.decode([String: [Episode]].self, forKey: .episodes)) ?? [:]
-        seasons = Dictionary(uniqueKeysWithValues: raw.compactMap { k, v in
-            Int(k).map { n in (n, v.sorted { $0.number < $1.number }) }
-        })
-    }
+    let info: Show?
+    let episodes: [Int: [Episode]]
 }
 
+// MARK: - Auth
 struct AuthInfo: Decodable {
     let authorized: Bool
-    let status: String
-    enum K: String, CodingKey { case user_info }
-    enum U: String, CodingKey { case auth, status }
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: K.self)
-        let u = try c.nestedContainer(keyedBy: U.self, forKey: .user_info)
-        authorized = u.flex(.auth) == "1"
-        status = u.flex(.status) ?? ""
-    }
+    let status: String?
 }
