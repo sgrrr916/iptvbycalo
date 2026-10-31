@@ -1,0 +1,25 @@
+name: IPTVPlayer
+options:
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  IPTVPlayer:
+    type: application
+    platform: iOS
+    sources:
+      - IPTVPlayer
+    info:
+      path: IPTVPlayer/Info.plist
+      properties:
+        CFBundleDisplayName: IPTV Player
+        UILaunchScreen: {}
+        UIBackgroundModes: [audio]
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.iptvplayer
+        SWIFT_VERSION: "5.0"
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
