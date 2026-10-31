@@ -3,7 +3,7 @@ import AVKit
 
 @main
 struct IPTVPlayerApp: App {
-    @StateObject private var app = AppState()
+    @StateObject private var app = AppState.shared
     var body: some Scene {
         WindowGroup {
             RootView()
@@ -18,10 +18,17 @@ struct RootView: View {
     var body: some View {
         if let client = app.client {
             TabView {
-                LiveView().tabItem { Label("Live", systemImage: "tv") }
-                MoviesView(client: client).tabItem { Label("Film", systemImage: "film") }
-                SeriesView(client: client).tabItem { Label("Serie", systemImage: "play.square.stack") }
-                SettingsView().tabItem { Label("Impostazioni", systemImage: "gearshape") }
+                LiveView()
+                    .tabItem { Label("Live", systemImage: "tv") }
+
+                EPGView()
+                    .tabItem { Label("Guida TV", systemImage: "calendar") }
+
+                SportView()
+                    .tabItem { Label("Sport", systemImage: "sportscourt") }
+
+                SettingsView()
+                    .tabItem { Label("Impostazioni", systemImage: "gearshape") }
             }
         } else {
             LoginView()
@@ -131,30 +138,5 @@ struct PlayerScreen: View {
 extension View {
     func playerCover(_ item: Binding<PlayItem?>, pip: Bool) -> some View {
         fullScreenCover(item: item) { PlayerScreen(item: $0, pip: pip) }
-    }
-}
-
-// MARK: Impostazioni
-struct SettingsView: View {
-    @EnvironmentObject var app: AppState
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Account") {
-                    LabeledContent("Server", value: app.creds?.baseURL ?? "")
-                    LabeledContent("Utente", value: app.creds?.username ?? "")
-                }
-                Section("TV in diretta") {
-                    Toggle("Picture in Picture", isOn: $app.pipEnabled)
-                    LabeledContent("Canali preferiti", value: "\(app.favorites.count)")
-                    Button("Rimuovi tutti i preferiti", role: .destructive) { app.favorites = [] }
-                        .disabled(app.favorites.isEmpty)
-                }
-                Section {
-                    Button("Esci", role: .destructive) { app.creds = nil }
-                }
-            }
-            .navigationTitle("Impostazioni")
-        }
     }
 }
