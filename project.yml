@@ -19,7 +19,7 @@ targets:
           NSAllowsArbitraryLoads: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.example.iptvplayer
+        PRODUCT_BUNDLE_IDENTIFIER: com.calo.iptvplayer
         SWIFT_VERSION: "5.0"
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
