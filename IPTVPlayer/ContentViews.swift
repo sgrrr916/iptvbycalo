@@ -1,297 +1,520 @@
 import SwiftUI
+import AVKit
 
-// MARK: Live
+// MARK: - Poster Cell (riutilizzabile)
+struct PosterCell: View {
+    let item: any CatalogItem
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            AsyncImage(url: URL(string: item.imageURL ?? "")) { phase in
+                switch phase {
+                case .success(let img): img.resizable().aspectRatio(2/3, contentMode: .fill)
+                case .failure: Color.gray.opacity(0.3).aspectRatio(2/3, contentMode: .fit)
+                default: Color.gray.opacity(0.2).aspectRatio(2/3, contentMode: .fit)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            Text(item.title).font(.caption).lineLimit(2).foregroundStyle(.white)
+        }
+    }
+}
+
+// MARK: - LIVE
 struct LiveView: View {
     @EnvironmentObject var app: AppState
     @State private var categories: [Category] = []
-    @State private var loading = true
     @State private var error: String?
-    @State private var search = ""
-
-    private var filtered: [Category] {
-        search.isEmpty ? categories : categories.filter { $0.name.localizedCaseInsensitiveContains(search) }
-    }
 
     var body: some View {
         NavigationStack {
             List {
-                NavigationLink {
-                    ChannelListView(title: "Preferiti", category: nil, onlyFavorites: true)
-                } label: { Label("Preferiti", systemImage: "heart.fill") }
-                ForEach(filtered) { cat in
+                if !app.favorites.isEmpty {
                     NavigationLink {
-                        ChannelListView(title: cat.name, category: cat.id, onlyFavorites: false)
-                    } label: { Label(cat.name, systemImage: "folder") }
+                        ChannelListView(category: nil, title: "Preferiti", onlyFavorites: true)
+                    } label: {
+                        Label("Preferiti", systemImage: "star.fill").foregroundStyle(.yellow)
+                    }
+                }
+                ForEach(categories) { cat in
+                    NavigationLink {
+                        ChannelListView(category: cat.id, title: cat.name)
+                    } label: { Text(cat.name) }
                 }
             }
-            .overlay {
-                if loading { ProgressView() }
-                else if let error { Text(error).foregroundStyle(.secondary).padding() }
-            }
-            .navigationTitle("Live")
-            .searchable(text: $search, prompt: "Cerca categoria")
-            .task {
-                guard let client = app.client else { return }
-                do { categories = try await client.liveCategories() }
-                catch { self.error = error.localizedDescription }
-                loading = false
-            }
+            .navigationTitle("TV in diretta")
+            .task { await loadCategories() }
+            .refreshable { await loadCategories() }
+            .overlay { if categories.isEmpty && error == nil { ProgressView() } }
+            .alert("Errore", isPresented: .constant(error != nil), actions: { Button("OK") { error = nil } }, message: { Text(error ?? "") })
         }
+    }
+
+    private func loadCategories() async {
+        guard let client = app.client else { return }
+        do { categories = try await client.liveCategories() }
+        catch { self.error = error.localizedDescription }
     }
 }
 
 struct ChannelListView: View {
-    let title: String
-    let category: String?
-    let onlyFavorites: Bool
     @EnvironmentObject var app: AppState
-    @State private var channels: [LiveChannel] = []
-    @State private var loading = true
-    @State private var error: String?
-    @State private var search = ""
-    @State private var playing: PlayItem?
+    let category: Int?
+    let title: String
+    var onlyFavorites: Bool = false
 
-    private var shown: [LiveChannel] {
-        channels.filter {
-            (!onlyFavorites || app.favorites.contains($0.id)) &&
-            (search.isEmpty || $0.name.localizedCaseInsensitiveContains(search))
-        }
+    @State private var channels: [LiveChannel] = []
+    @State private var error: String?
+    @State private var searchText = ""
+
+    var filtered: [LiveChannel] {
+        if searchText.isEmpty { return channels }
+        return channels.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
     }
 
     var body: some View {
-        List(shown) { ch in
-            HStack {
-                Button { play(ch) } label: {
-                    HStack(spacing: 12) {
-                        AsyncImage(url: ch.icon) { $0.resizable().scaledToFit() } placeholder: {
-                            Image(systemName: "tv").foregroundStyle(.secondary)
-                        }
-                        .frame(width: 44, height: 44)
-                        Text(ch.name)
-                        Spacer()
-                    }
-                }
-                .buttonStyle(.plain)
+        List(filtered) { ch in
+            HStack(spacing: 12) {
+                AsyncImage(url: URL(string: ch.icon ?? "")) { $0.resizable() } placeholder: { Color.gray.opacity(0.3) }
+                    .frame(width: 50, height: 30).clipShape(RoundedRectangle(cornerRadius: 4))
+                Text(ch.name).lineLimit(1)
+                Spacer()
                 Button { app.toggleFavorite(ch.id) } label: {
                     Image(systemName: app.favorites.contains(ch.id) ? "heart.fill" : "heart")
-                        .foregroundStyle(.pink)
+                        .foregroundStyle(app.favorites.contains(ch.id) ? .red : .gray)
                 }
-                .buttonStyle(.plain)
             }
+            .contentShape(Rectangle())
+            .onTapGesture { play(ch) }
         }
-        .overlay {
-            if loading { ProgressView() }
-            else if let error { Text(error).foregroundStyle(.secondary).padding() }
-            else if shown.isEmpty { Text("Nessun canale").foregroundStyle(.secondary) }
-        }
+        .searchable(text: $searchText, prompt: "Cerca canale")
         .navigationTitle(title)
-        .searchable(text: $search, prompt: "Cerca canale")
-        .playerCover($playing, pip: app.pipEnabled)
-        .task {
-            guard let client = app.client else { return }
-            do { channels = try await client.liveChannels(category: category) }
-            catch { self.error = error.localizedDescription }
-            loading = false
-        }
+        .task { await load() }
+        .refreshable { await load() }
+        .overlay { if channels.isEmpty && error == nil { ProgressView() } }
+        .alert("Errore", isPresented: .constant(error != nil), actions: { Button("OK") { error = nil } }, message: { Text(error ?? "") })
+    }
+
+    private func load() async {
+        guard let client = app.client else { return }
+        do {
+            let all = try await client.liveChannels(category: category)
+            channels = onlyFavorites ? all.filter { app.favorites.contains($0.id) } : all
+        } catch { self.error = error.localizedDescription }
     }
 
     private func play(_ ch: LiveChannel) {
-        guard let url = app.client?.liveURL(ch) else { return }
-        playing = PlayItem(url: url, title: ch.name)
+        guard let client = app.client, let url = client.liveURL(ch) else { return }
+        let item = PlayItem(url: url, title: ch.name, icon: ch.icon, channelId: ch.id)
+        app.addToHistory(item)
+        app.currentPlayItem = item
     }
 }
 
-// MARK: Catalogo generico (Film e Serie)
-struct PosterCell<Item: CatalogItem>: View {
-    let item: Item
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            AsyncImage(url: item.imageURL) { $0.resizable().scaledToFill() } placeholder: {
-                ZStack { Color.gray.opacity(0.2); Image(systemName: "photo").foregroundStyle(.secondary) }
-            }
-            .aspectRatio(2/3, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            Text(item.title).font(.caption).lineLimit(2).multilineTextAlignment(.leading)
-        }
-    }
-}
-
-struct CatalogView<Item: CatalogItem, Detail: View>: View {
-    let title: String
-    let loadCategories: () async throws -> [Category]
-    let loadItems: (String) async throws -> [Item]
-    @ViewBuilder let detail: (Item) -> Detail
-
+// MARK: - EPG / GUIDA TV
+struct EPGView: View {
+    @EnvironmentObject var app: AppState
+    @State private var epgChannels: [EPGChannel] = []
     @State private var categories: [Category] = []
-    @State private var selected: String?
-    @State private var cache: [String: [Item]] = [:]
-    @State private var loading = true
+    @State private var selectedCategory: Int? = nil
+    @State private var selectedDate = Date()
     @State private var error: String?
-    @State private var search = ""
+    @State private var isLoading = false
 
-    private var items: [Item] {
-        let all = cache[selected ?? ""] ?? []
-        return search.isEmpty ? all : all.filter { $0.title.localizedCaseInsensitiveContains(search) }
+    var filteredChannels: [EPGChannel] {
+        guard let cat = selectedCategory else { return epgChannels }
+        return epgChannels.filter { $0.id == cat || categories.first(where: { $0.id == cat }) != nil }
     }
 
     var body: some View {
         NavigationStack {
-            ScrollView {
+            VStack(spacing: 0) {
+                // Category picker + date picker
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack {
+                    HStack(spacing: 12) {
+                        CategoryChip(title: "Tutti", isSelected: selectedCategory == nil) { selectedCategory = nil }
                         ForEach(categories) { cat in
-                            Button(cat.name) { selected = cat.id }
-                                .buttonStyle(.bordered)
-                                .tint(cat.id == selected ? .accentColor : .gray)
+                            CategoryChip(title: cat.name, isSelected: selectedCategory == cat.id) { selectedCategory = cat.id }
+                        }
+                    }.padding(.horizontal)
+                }.padding(.vertical, 8)
+
+                DatePicker("", selection: $selectedDate, displayedComponents: .date)
+                    .datePickerStyle(.compact)
+                    .labelsHidden()
+                    .padding(.horizontal)
+                    .onChange(of: selectedDate) { _ in Task { await loadEPG() } }
+
+                // EPG Grid
+                if epgChannels.isEmpty && !isLoading {
+                    ContentUnavailableView("Nessun dato EPG", systemImage: "tv.badge.wifi", description: Text("Scarica la guida TV dal server"))
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 16) {
+                            ForEach(filteredChannels) { ch in
+                                EPGChannelRow(channel: ch, selectedDate: selectedDate)
+                            }
+                        }.padding()
+                    }
+                }
+            }
+            .navigationTitle("Guida TV")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button { Task { await loadEPG() } } label: { Image(systemName: "arrow.clockwise") }.disabled(isLoading)
+                }
+            }
+            .task { await loadCategories(); await loadEPG() }
+            .refreshable { await loadCategories(); await loadEPG() }
+            .alert("Errore", isPresented: .constant(error != nil), actions: { Button("OK") { error = nil } }, message: { Text(error ?? "") })
+        }
+    }
+
+    private func loadCategories() async {
+        guard let client = app.client else { return }
+        do { categories = try await client.liveCategories() }
+        catch { self.error = error.localizedDescription }
+    }
+
+    private func loadEPG() async {
+        guard let client = app.client else { return }
+        isLoading = true; error = nil
+        do {
+            let programs: [EPGProgram] = try await client.epgAll()
+            let channels = try await client.liveChannels()
+            let cal = Calendar.current
+            let dayPrograms = programs.filter { cal.isDate($0.start, inSameDayAs: selectedDate) }
+
+            var map: [Int: [EPGProgram]] = [:]
+            for p in dayPrograms { map[p.channelId, default: []].append(p) }
+
+            epgChannels = channels.compactMap { ch in
+                guard let progs = map[ch.id], !progs.isEmpty else { return nil }
+                return EPGChannel(channel: ch, programs: progs)
+            }
+        } catch { self.error = error.localizedDescription }
+        isLoading = false
+    }
+}
+
+struct CategoryChip: View {
+    let title: String; let isSelected: Bool; let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Text(title).font(.subheadline).padding(.horizontal, 16).padding(.vertical, 8)
+                .background(isSelected ? Color.blue : Color.gray.opacity(0.2))
+                .foregroundStyle(isSelected ? .white : .primary)
+                .clipShape(Capsule())
+        }
+    }
+}
+
+struct EPGChannelRow: View {
+    let channel: EPGChannel
+    let selectedDate: Date
+    @EnvironmentObject var app: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                AsyncImage(url: URL(string: channel.icon ?? "")) { $0.resizable() } placeholder: { Color.gray.opacity(0.3) }
+                    .frame(width: 40, height: 22).clipShape(RoundedRectangle(cornerRadius: 4))
+                Text(channel.name).font(.headline).foregroundStyle(.white)
+                Spacer()
+                if let current = channel.currentProgram {
+                    LiveBadge()
+                }
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(channel.programs) { prog in
+                        EPGProgramCard(program: prog, channel: channel)
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct LiveBadge: View {
+    @State private var blink = false
+    var body: some View {
+        Text("IN ONDA").font(.caption2).bold().padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Color.red).foregroundStyle(.white).clipShape(Capsule())
+            .opacity(blink ? 1 : 0.5).onAppear { withAnimation(.easeInOut(duration: 1).repeatForever()) { blink = true } }
+    }
+}
+
+struct EPGProgramCard: View {
+    let program: EPGProgram
+    let channel: EPGChannel
+    @EnvironmentObject var app: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(program.formattedTime).font(.caption2).foregroundStyle(.gray)
+            Text(program.title).font(.subheadline).bold().lineLimit(2).foregroundStyle(.white)
+            if let cat = program.category, cat.lowercased().contains("sport") || cat.lowercased().contains("calcio") {
+                Text(cat).font(.caption2).padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Color.green.opacity(0.3)).foregroundStyle(.green).clipShape(Capsule())
+            }
+        }
+        .frame(width: 160)
+        .padding(8)
+        .background(program.isLiveNow ? Color.blue.opacity(0.3) : Color.gray.opacity(0.15))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(program.isLiveNow ? Color.blue : Color.clear, lineWidth: 2)
+        )
+        .onTapGesture { playChannel() }
+    }
+
+    private func playChannel() {
+        guard let client = app.client, let url = client.liveURL(LiveChannel(id: channel.id, name: channel.name, icon: channel.icon, categoryId: nil)) else { return }
+        let item = PlayItem(url: url, title: channel.name, icon: channel.icon, channelId: channel.id)
+        app.addToHistory(item)
+        app.currentPlayItem = item
+    }
+}
+
+// MARK: - SPORT (Partite calcio -> canali)
+struct SportView: View {
+    @EnvironmentObject var app: AppState
+    @State private var leagues: [LeagueGroup] = []
+    @State private var error: String?
+    @State private var isLoading = false
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if leagues.isEmpty && !isLoading {
+                    ContentUnavailableView("Nessuna partita", systemImage: "sportscourt", description: Text("Nessun evento sportivo trovato nell'EPG"))
+                } else {
+                    List {
+                        ForEach(leagues) { league in
+                            Section(league.name) {
+                                ForEach(league.matches) { match in
+                                    NavigationLink {
+                                        MatchDetailView(match: match)
+                                    } label: {
+                                        MatchRow(match: match)
+                                    }
+                                }
+                            }
                         }
                     }
-                    .padding(.horizontal)
-                }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 105), spacing: 12)], spacing: 16) {
-                    ForEach(items) { item in
-                        NavigationLink(value: item) { PosterCell(item: item) }.buttonStyle(.plain)
-                    }
-                }
-                .padding()
-            }
-            .overlay {
-                if loading { ProgressView() }
-                else if let error { Text(error).foregroundStyle(.secondary).padding() }
-            }
-            .navigationDestination(for: Item.self) { detail($0) }
-            .navigationTitle(title)
-            .searchable(text: $search, prompt: "Cerca")
-            .task {
-                do {
-                    categories = try await loadCategories()
-                    selected = categories.first?.id
-                    if categories.isEmpty { loading = false }
-                } catch {
-                    self.error = error.localizedDescription
-                    loading = false
                 }
             }
-            .task(id: selected) {
-                guard let sel = selected else { return }
-                if cache[sel] == nil {
-                    loading = true
-                    do { cache[sel] = try await loadItems(sel) }
-                    catch { self.error = error.localizedDescription }
+            .navigationTitle("Sport ⚽")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button { Task { await loadMatches() } } label: { Image(systemName: "arrow.clockwise") }.disabled(isLoading)
                 }
-                loading = false
             }
+            .task { await loadMatches() }
+            .refreshable { await loadMatches() }
+            .alert("Errore", isPresented: .constant(error != nil), actions: { Button("OK") { error = nil } }, message: { Text(error ?? "") })
         }
+    }
+
+    private func loadMatches() async {
+        guard let client = app.client else { return }
+        isLoading = true; error = nil
+        do {
+            // 1. Scarica EPG completo
+            let programs: [EPGProgram] = try await client.epgAll()
+            let channels = try await client.liveChannels()
+
+            // 2. Filtra programmi sportivi (calcio) degli ultimi/giorni prossimi
+            let now = Date()
+            let window = now.addingTimeInterval(7 * 24 * 3600) // 7 giorni
+            let sportPrograms = programs.filter {
+                let cat = $0.category?.lowercased() ?? ""
+                return (cat.contains("calcio") || cat.contains("sport") || cat.contains("football") || cat.contains("serie a") || cat.contains("champions") || cat.contains("europa") || cat.contains("coppa") || cat.contains("premier") || cat.contains("liga") || cat.contains("bundesliga") || cat.contains("serie b"))
+                && $0.start <= window && $0.end >= now.addingTimeInterval(-3600)
+            }
+
+            // 3. Raggruppa per "partita" (stesso titolo, stesso orario simile)
+            var matchMap: [String: FootballMatch] = [:]
+            for prog in sportPrograms {
+                let key = "\(prog.title)_\(Int(prog.start.timeIntervalSince1970 / 300))" // bucket 5 min
+                let matchChannels = channels.filter { ch in
+                    sportPrograms.contains { $0.channelId == ch.id && $0.title == prog.title && abs($0.start.timeIntervalSince(prog.start)) < 300 }
+                }
+                if let existing = matchMap[key] {
+                    // merge channels
+                    var updated = existing
+                    updated = FootballMatch(
+                        id: existing.id,
+                        homeTeam: existing.homeTeam,
+                        awayTeam: existing.awayTeam,
+                        league: existing.league,
+                        startTime: existing.startTime,
+                        endTime: existing.endTime,
+                        channels: Array(Set(existing.channels + matchChannels))
+                    )
+                    matchMap[key] = updated
+                } else {
+                    let (home, away) = parseTeams(from: prog.title)
+                    let league = extractLeague(from: prog.category ?? "", title: prog.title)
+                    matchMap[key] = FootballMatch(
+                        id: prog.id,
+                        homeTeam: home,
+                        awayTeam: away,
+                        league: league,
+                        startTime: prog.start,
+                        endTime: prog.end,
+                        channels: matchChannels
+                    )
+                }
+            }
+
+            // 4. Raggruppa per league
+            var leagueMap: [String: [FootballMatch]] = [:]
+            for m in matchMap.values { leagueMap[m.league, default: []].append(m) }
+
+            leagues = leagueMap.map { (name, matches) in
+                LeagueGroup(name: name, matches: matches.sorted { $0.startTime < $1.startTime })
+            }.sorted { $0.name < $1.name }
+
+        } catch { self.error = error.localizedDescription }
+        isLoading = false
+    }
+
+    private func parseTeams(from title: String) -> (String, String) {
+        // Tenta di parsare "Team A vs Team B" o "Team A - Team B"
+        let seps = [" vs ", " - ", " contro ", " vs. "]
+        for sep in seps {
+            let parts = title.components(separatedBy: sep)
+            if parts.count == 2 { return (parts[0].trimmingCharacters(in: .whitespaces), parts[1].trimmingCharacters(in: .whitespaces)) }
+        }
+        return (title, "")
+    }
+
+    private func extractLeague(from category: String, title: String) -> String {
+        let cat = category.lowercased()
+        if cat.contains("serie a") { return "Serie A" }
+        if cat.contains("serie b") { return "Serie B" }
+        if cat.contains("champions") { return "Champions League" }
+        if cat.contains("europa") { return "Europa League" }
+        if cat.contains("conference") { return "Conference League" }
+        if cat.contains("premier") { return "Premier League" }
+        if cat.contains("liga") { return "La Liga" }
+        if cat.contains("bundesliga") { return "Bundesliga" }
+        if cat.contains("ligue 1") { return "Ligue 1" }
+        if cat.contains("serie c") { return "Serie C" }
+        if cat.contains("primavera") { return "Primavera" }
+        if cat.contains("coppa italia") { return "Coppa Italia" }
+        if cat.contains("supercoppa") { return "Supercoppa" }
+        if cat.contains("mondiali") { return "Mondiali" }
+        if cat.contains("europei") { return "Europei" }
+        if cat.contains("nations") { return "Nations League" }
+        return "Altro"
     }
 }
 
-// MARK: Film
-struct MoviesView: View {
-    let client: XtreamClient
+struct MatchRow: View {
+    let match: FootballMatch
     var body: some View {
-        CatalogView(title: "Film",
-                    loadCategories: { try await client.movieCategories() },
-                    loadItems: { try await client.movies(category: $0) }) { movie in
-            MovieDetailView(movie: movie)
-        }
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(match.homeTeam) vs \(match.awayTeam)").font(.headline).foregroundStyle(.white)
+                Text(match.league).font(.caption).foregroundStyle(.gray)
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(match.formattedTime).font(.subheadline).bold().foregroundStyle(.white)
+                if match.isLiveNow {
+                    LiveBadge()
+                } else {
+                    Text(match.formattedDate).font(.caption2).foregroundStyle(.gray)
+                }
+                Text("\(match.channels.count) canale\(match.channels.count == 1 ? "" : "i")")
+                    .font(.caption2).foregroundStyle(.blue)
+            }
+        }.padding(.vertical, 4)
     }
 }
 
-struct MovieDetailView: View {
-    let movie: Movie
+struct MatchDetailView: View {
+    let match: FootballMatch
     @EnvironmentObject var app: AppState
-    @State private var playing: PlayItem?
-
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 16) {
-                AsyncImage(url: movie.imageURL) { $0.resizable().scaledToFit() } placeholder: { Color.gray.opacity(0.2) }
-                    .frame(maxHeight: 360)
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
-                Text(movie.title).font(.title2.bold()).multilineTextAlignment(.center)
-                if let r = movie.rating, !r.isEmpty, r != "0" {
-                    Label(r, systemImage: "star.fill").foregroundStyle(.yellow)
-                }
-                Button {
-                    if let url = app.client?.movieURL(movie) { playing = PlayItem(url: url, title: movie.title) }
-                } label: {
-                    Label("Riproduci", systemImage: "play.fill").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-            }
-            .padding()
-        }
-        .navigationBarTitleDisplayMode(.inline)
-        .playerCover($playing, pip: app.pipEnabled)
-    }
-}
-
-// MARK: Serie
-struct SeriesView: View {
-    let client: XtreamClient
-    var body: some View {
-        CatalogView(title: "Serie",
-                    loadCategories: { try await client.seriesCategories() },
-                    loadItems: { try await client.shows(category: $0) }) { show in
-            SeriesDetailView(show: show)
-        }
-    }
-}
-
-struct SeriesDetailView: View {
-    let show: Show
-    @EnvironmentObject var app: AppState
-    @State private var detail: SeriesDetail?
-    @State private var season = 1
-    @State private var loading = true
-    @State private var playing: PlayItem?
 
     var body: some View {
         List {
             Section {
-                HStack(alignment: .top, spacing: 12) {
-                    AsyncImage(url: show.imageURL) { $0.resizable().scaledToFill() } placeholder: { Color.gray.opacity(0.2) }
-                        .frame(width: 100, height: 150)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                    Text(show.plot ?? "").font(.footnote).foregroundStyle(.secondary)
-                }
+                VStack(spacing: 12) {
+                    Text("\(match.homeTeam) vs \(match.awayTeam)").font(.title2).bold().multilineTextAlignment(.center)
+                    Text(match.league).font(.subheadline).foregroundStyle(.gray)
+                    HStack(spacing: 20) {
+                        Label(match.formattedDate, systemImage: "calendar")
+                        Label(match.formattedTime, systemImage: "clock")
+                    }.font(.subheadline).foregroundStyle(.white)
+                    if match.isLiveNow { LiveBadge() }
+                }.frame(maxWidth: .infinity).padding(.vertical)
             }
-            if let detail {
-                Picker("Stagione", selection: $season) {
-                    ForEach(detail.seasons.keys.sorted(), id: \.self) { Text("Stagione \($0)").tag($0) }
-                }
-                .pickerStyle(.menu)
-                Section {
-                    ForEach(detail.seasons[season] ?? []) { ep in
-                        Button { play(ep) } label: {
-                            HStack {
-                                Text("\(ep.number)").foregroundStyle(.secondary).frame(width: 28)
-                                Text(ep.title)
-                                Spacer()
-                                Image(systemName: "play.fill").foregroundStyle(.secondary)
-                            }
+
+            Section("Canali disponibili (\(match.channels.count))") {
+                ForEach(match.channels) { ch in
+                    Button { playChannel(ch) } label: {
+                        HStack(spacing: 12) {
+                            AsyncImage(url: URL(string: ch.icon ?? "")) { $0.resizable() } placeholder: { Color.gray.opacity(0.3) }
+                                .frame(width: 50, height: 30).clipShape(RoundedRectangle(cornerRadius: 4))
+                            Text(ch.name).foregroundStyle(.white)
+                            Spacer()
+                            Image(systemName: "play.circle.fill").foregroundStyle(.green)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
             }
-        }
-        .overlay { if loading { ProgressView() } }
-        .navigationTitle(show.title)
-        .navigationBarTitleDisplayMode(.inline)
-        .playerCover($playing, pip: app.pipEnabled)
-        .task {
-            guard let client = app.client else { return }
-            if let d = try? await client.seriesDetail(id: show.id) {
-                detail = d
-                season = d.seasons.keys.min() ?? 1
+
+            if !match.channels.isEmpty {
+                Section {
+                    Button("Apri tutti in PiP (sperimentale)") {
+                        // TODO: implementare multi-PiP se serve
+                    }.foregroundStyle(.blue)
+                }
             }
-            loading = false
         }
+        .navigationTitle("Dettaglio partita")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
-    private func play(_ ep: Episode) {
-        guard let url = app.client?.episodeURL(ep) else { return }
-        playing = PlayItem(url: url, title: ep.title)
+    private func playChannel(_ ch: LiveChannel) {
+        guard let client = app.client, let url = client.liveURL(ch) else { return }
+        let item = PlayItem(url: url, title: ch.name, icon: ch.icon, channelId: ch.id)
+        app.addToHistory(item)
+        app.currentPlayItem = item
+    }
+}
+
+// MARK: - IMPOSTAZIONI (con history)
+struct SettingsView: View {
+    @EnvironmentObject var app: AppState
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Account") {
+                    LabeledContent("Server", value: app.creds?.baseURL ?? "")
+                    LabeledContent("Utente", value: app.creds?.username ?? "")
+                }
+                Section("TV in diretta") {
+                    Toggle("Picture in Picture", isOn: $app.pipEnabled)
+                    LabeledContent("Canali preferiti", value: "\(app.favorites.count)")
+                    Button("Rimuovi tutti i preferiti", role: .destructive) { app.favorites = [] }
+                        .disabled(app.favorites.isEmpty)
+                }
+                Section("Cronologia") {
+                    LabeledContent("Elementi", value: "\(app.recentHistory.count)")
+                    if !app.recentHistory.isEmpty {
+                        Button("Cancella cronologia", role: .destructive) { app.recentHistory = [] }
+                    }
+                }
+                Section {
+                    Button("Esci", role: .destructive) { app.logout() }
+                }
+            }
+            .navigationTitle("Impostazioni")
+        }
     }
 }
